@@ -1,3 +1,4 @@
 sqlalchemy
 pytrends
 pandas
+playwright
