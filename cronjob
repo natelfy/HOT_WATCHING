@@ -1,0 +1,12 @@
+# cronjob
+
+# 1. Ingestion des données (Toutes les 4h : 00:00, 04:00, 08:00...)
+0 */4 * * * /usr/local/bin/python -m src.collectors.google_trends >> /var/log/cron.log 2>&1
+5 */4 * * * /usr/local/bin/python -m src.collectors.reddit_loader >> /var/log/cron.log 2>&1
+10 */4 * * * /usr/local/bin/python -m src.collectors.tiktok_loader >> /var/log/cron.log 2>&1
+
+# 2. Analyse Radar & Détection d'Opportunités (15 min après l'ingestion)
+15 */4 * * * /usr/local/bin/python -m src.analysis.cross_platform_radar >> /var/log/cron.log 2>&1
+
+# (Optionnel) Nettoyage des logs pour ne pas saturer le disque
+0 0 * * 0 echo "" > /var/log/cron.log
