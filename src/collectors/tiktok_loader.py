@@ -1,123 +1,126 @@
-import time
-import json
+import math
 from playwright.sync_api import sync_playwright
-from datetime import datetime
-from src.models.base import Session, Trend, TrendMetric, init_db
+from src.models.base import Session, init_db, upsert_trend, add_metric
 
-# URLs Cibles (TikTok Creative Center)
+# ─── CONFIG ──────────────────────────────────────────────────────────
 URL_HASHTAGS = "https://ads.tiktok.com/business/creativecenter/inspiration/popular/hashtag/pc/en"
 URL_SONGS = "https://ads.tiktok.com/business/creativecenter/inspiration/popular/music/pc/en"
 
-# Mappage des industries TikTok vers tes Niches
-# (On filtre a posteriori pour garder le script flexible)
 NICHE_KEYWORDS = {
-    'Cinema': ['movie', 'netflix', 'film', 'actor', 'cinema', 'disney'],
-    'Sport': ['football', 'nba', 'sport', 'fitness', 'gym', 'ufc'],
-    'Music': ['song', 'music', 'concert', 'lyrics', 'rap', 'pop']
+    'Cinema': ['movie', 'netflix', 'film', 'actor', 'cinema', 'disney', 'series', 'show',
+               'marvel', 'trailer', 'premiere', 'oscar', 'hbo', 'anime'],
+    'Sport':  ['football', 'nba', 'sport', 'fitness', 'gym', 'ufc', 'soccer', 'basketball',
+               'f1', 'tennis', 'running', 'workout', 'match', 'goal'],
+    'Music':  ['song', 'music', 'concert', 'lyrics', 'rap', 'pop', 'singer', 'album',
+               'dj', 'beat', 'dance', 'kpop', 'hiphop', 'remix'],
 }
 
-def intercept_tiktok_data(page_type="hashtag"):
-    """
-    Lance un navigateur, va sur le Creative Center, et intercepte le JSON de l'API.
-    """
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+def intercept_tiktok_data(page_type: str = "hashtag") -> list[dict]:
+    """Launch headless browser, navigate to Creative Center, intercept API JSON."""
     data_captured = []
-    
+
     with sync_playwright() as p:
-        # Lancement du navigateur (Headless = sans interface graphique)
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        context = browser.new_context(user_agent=USER_AGENT)
         page = context.new_page()
 
-        # Fonction de callback déclenchée à chaque réponse réseau
         def handle_response(response):
-            # On cherche les réponses JSON provenant de l'API Creative Radical
-            if "api/v1" in response.url and "json" in response.headers.get("content-type", ""):
-                try:
-                    json_body = response.json()
-                    # Structure typique : data -> list ou data -> promotions
-                    if "data" in json_body:
-                        # On capture tout ce qui ressemble à une liste
-                        extracted = json_body.get("data", {}).get("list", [])
-                        if extracted:
-                            print(f"  ⚡ INTERCEPTION RÉUSSIE : {len(extracted)} items trouvés via {response.url[-40:]}...")
-                            data_captured.extend(extracted)
-                except:
-                    pass # On ignore les erreurs de parsing sur les requêtes non pertinentes
+            try:
+                ct = response.headers.get("content-type", "")
+                if "api" in response.url and "json" in ct:
+                    body = response.json()
+                    items = body.get("data", {}).get("list", [])
+                    if items:
+                        print(f"  ⚡ Intercepté: {len(items)} items")
+                        data_captured.extend(items)
+            except Exception:
+                pass
 
-        # On branche l'écouteur
         page.on("response", handle_response)
 
-        # Navigation vers la cible
-        target_url = URL_HASHTAGS if page_type == "hashtag" else URL_SONGS
-        print(f"🕵️  Infiltration de : {target_url} ...")
-        
+        target = URL_HASHTAGS if page_type == "hashtag" else URL_SONGS
+        print(f"🕵️ TikTok: loading {page_type}...")
+
         try:
-            page.goto(target_url, timeout=60000)
-            # On scrolle un peu pour déclencher le chargement des données
-            page.wait_for_timeout(5000) # Pause pour laisser l'API répondre
-            page.mouse.wheel(0, 3000)
-            page.wait_for_timeout(3000)
+            page.goto(target, timeout=60000)
+            page.wait_for_timeout(5000)
+            # Scroll to trigger lazy-loaded API calls
+            for _ in range(3):
+                page.mouse.wheel(0, 2000)
+                page.wait_for_timeout(2000)
         except Exception as e:
-            print(f"❌ Timeout ou Erreur Nav: {e}")
-        
+            print(f"  ❌ TikTok navigation error: {e}")
+
         browser.close()
-    
+
     return data_captured
+
+
+def classify_niche(name: str) -> str:
+    name_lower = name.lower()
+    for niche, keywords in NICHE_KEYWORDS.items():
+        if any(kw in name_lower for kw in keywords):
+            return niche
+    return 'General'
+
+
+def compute_velocity(view_count: int, rank: int, total: int) -> float:
+    """
+    TikTok velocity: if it's on Creative Center trending, it's already viral.
+    Score = log-volume base + rank position bonus.
+    """
+    base = math.log10(max(view_count, 1)) * 15
+    rank_bonus = max(0, (total - rank) / max(total, 1)) * 40
+    # Minimum floor: being on trending page = at least 50
+    return round(max(base + rank_bonus, 50.0), 1)
+
 
 def process_tiktok_trends():
     session = Session()
-    print("🚀 Démarrage du module TikTok Interceptor...")
-    
-    # 1. Récupération des Hashtags
+    print("🚀 TikTok: démarrage de l'interception...")
+
     hashtags = intercept_tiktok_data("hashtag")
-    
+
+    if not hashtags:
+        print("  ⚠️ Aucun hashtag intercepté (le DOM a peut-être changé).")
+        session.close()
+        return
+
     count_new = 0
-    for item in hashtags:
-        # Extraction sécurisée des données (la structure change parfois)
-        name = item.get("hashtag_name", "")
-        if not name: continue
-        
-        # Le volume est souvent caché dans des clés bizarres ou absent
-        # On utilise une valeur par défaut ou une métrique disponible
-        # Ici on simule une extraction de volume relatif
-        view_count = item.get("view_count", 0) 
-        
-        # Classification Niche
-        assigned_niche = 'General'
-        for niche, keywords in NICHE_KEYWORDS.items():
-            if any(k in name.lower() for k in keywords):
-                assigned_niche = niche
-                break
-        
-        # Logique Upsert
+    total = len(hashtags)
+
+    for rank, item in enumerate(hashtags):
+        name = item.get("hashtag_name", "") or item.get("name", "")
+        if not name:
+            continue
+
+        view_count = item.get("view_count", 0) or item.get("video_views", 0) or 0
+        # Sometimes view_count is a string
+        if isinstance(view_count, str):
+            view_count = int(view_count.replace(',', '').replace('+', '') or 0)
+
+        niche = classify_niche(name)
+        velocity = compute_velocity(view_count, rank, total)
         topic_name = f"#{name}"
-        trend_obj = session.query(Trend).filter_by(topic=topic_name).first()
-        
-        if not trend_obj:
-            trend_obj = Trend(topic=topic_name, niche=assigned_niche)
-            session.add(trend_obj)
-            session.commit()
+
+        trend = upsert_trend(session, topic_name, niche, 'TikTok')
+        was_new = trend.first_detected == trend.last_updated
+        add_metric(session, trend, 'TikTok', view_count, velocity)
+
+        if was_new:
             count_new += 1
-            print(f"  [+] Nouveau Hashtag Viral : {topic_name} ({assigned_niche})")
-
-        # Métrique (On stocke le rang ou le volume)
-        metric = TrendMetric(
-            trend_id=trend_obj.id,
-            platform='TikTok',
-            volume=view_count if view_count else 0,
-            velocity_score=100.0 # Par définition, si c'est ici, c'est viral
-        )
-        session.add(metric)
-
-    # 2. Récupération des Sons (Optionnel pour ta niche Musique)
-    # songs = intercept_tiktok_data("song")
-    # (Même logique de boucle ici si tu veux activer la musique)
+            print(f"  [+] {topic_name} ({niche}) — Views: {view_count:,} — Vel: {velocity}")
 
     session.commit()
     session.close()
-    print(f"✅ Ingestion TikTok terminée. {count_new} nouveaux sujets.")
+    print(f"✅ TikTok: terminé. {count_new} nouveaux sujets.")
+
 
 if __name__ == "__main__":
     init_db()

@@ -1,121 +1,136 @@
 import requests
 import json
-from src.models.base import Session, Trend, TrendMetric, init_db
 from datetime import datetime
+from src.models.base import Session, Trend, TrendMetric, init_db, upsert_trend, add_metric
 
-# URL de l'API interne (celle utilisée par le navigateur)
-# ns=15 est le namespace pour les Daily Trends
+# ─── CONFIG ──────────────────────────────────────────────────────────
 API_URL = "https://trends.google.com/trends/api/dailytrends?hl=fr&geo=FR&ns=15"
 
-# Headers pour se faire passer pour un navigateur (Anti-404)
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
-    "Referer": "https://trends.google.com/trends/trendingsearches/daily?geo=FR&hl=fr"
+    "Referer": "https://trends.google.com/trends/trendingsearches/daily?geo=FR&hl=fr",
 }
 
 NICHES = {
-    'Cinema': ['film', 'movie', 'trailer', 'netflix', 'série', 'cinéma', 'acteur', 'disney', 'marvel', 'star'],
-    'Sport': ['match', 'score', 'goal', 'ufc', 'nba', 'football', 'ligue', 'jo', 'athlète', 'vs', 'prix', 'course'],
-    'Music': ['lyrics', 'concert', 'album', 'song', 'feat', 'rap', 'musique', 'clip', 'chanteur']
+    'Cinema': ['film', 'movie', 'trailer', 'netflix', 'série', 'cinéma', 'acteur', 'actrice',
+               'disney', 'marvel', 'hbo', 'prime video', 'star wars', 'dc', 'oscar', 'cannes'],
+    'Sport':  ['match', 'score', 'goal', 'ufc', 'nba', 'football', 'ligue', 'jo', 'athlète',
+               'vs', 'prix', 'course', 'tennis', 'f1', 'psg', 'real madrid', 'champions league',
+               'olympique', 'transfert', 'blessure'],
+    'Music':  ['lyrics', 'concert', 'album', 'song', 'feat', 'rap', 'musique', 'clip',
+               'chanteur', 'chanteuse', 'grammy', 'spotify', 'tournée', 'tour', 'single'],
 }
 
-def fetch_internal_api():
-    """Récupère les données JSON brutes de l'API interne"""
+
+def parse_volume(traffic_str: str) -> int:
+    """Convert '200K+' -> 200000, '1M+' -> 1000000."""
+    s = traffic_str.replace(',', '').replace('+', '').strip()
+    if s.upper().endswith('K'):
+        return int(float(s[:-1]) * 1_000)
+    if s.upper().endswith('M'):
+        return int(float(s[:-1]) * 1_000_000)
     try:
-        response = requests.get(API_URL, headers=HEADERS, timeout=10)
-        
-        if response.status_code != 200:
-            print(f"❌ Erreur HTTP: {response.status_code}")
+        return int(s)
+    except ValueError:
+        return 0
+
+
+def fetch_daily_trends() -> list[dict]:
+    """Fetch raw trending searches from Google's internal JSON API."""
+    try:
+        resp = requests.get(API_URL, headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            print(f"❌ Google HTTP {resp.status_code}")
             return []
-            
-        # Google ajoute un préfixe de sécurité ")]}'," qu'il faut retirer
-        content = response.text
-        if content.startswith(")]}',"):
+
+        content = resp.text
+        if content.startswith(")]}',"): 
             content = content[5:]
-            
+
         data = json.loads(content)
-        
-        # Navigation dans le JSON complexe de Google
-        # Structure: default -> trendingSearchesDays -> [0] (Aujourd'hui) -> trendingSearches
-        daily_data = data.get('default', {}).get('trendingSearchesDays', [])
-        
-        if not daily_data:
+        days = data.get('default', {}).get('trendingSearchesDays', [])
+        if not days:
             return []
-            
-        # On prend le premier jour disponible
-        todays_trends = daily_data[0].get('trendingSearches', [])
-        
-        clean_items = []
-        for item in todays_trends:
-            title = item.get('title', {}).get('query', 'Inconnu')
-            traffic_str = item.get('formattedTraffic', '0')
-            
-            # Nettoyage "20K+" -> 20000
-            traffic = int(traffic_str.replace('K+', '000').replace('M+', '000000').replace(',', '').replace('+', ''))
-            
-            # Google donne aussi des articles liés (contexte)
-            articles = item.get('articles', [])
-            context = articles[0].get('title', '') if articles else ''
-            
-            clean_items.append({
-                'topic': title,
-                'volume': traffic,
-                'context': context
-            })
-            
-        return clean_items
+
+        results = []
+        for day in days[:2]:  # Today + yesterday for velocity comparison
+            for item in day.get('trendingSearches', []):
+                title = item.get('title', {}).get('query', '')
+                traffic = parse_volume(item.get('formattedTraffic', '0'))
+                articles = item.get('articles', [])
+                context = articles[0].get('title', '') if articles else ''
+
+                results.append({
+                    'topic': title,
+                    'volume': traffic,
+                    'context': context,
+                })
+        return results
 
     except Exception as e:
-        print(f"❌ Erreur Parsing: {e}")
+        print(f"❌ Google Parsing Error: {e}")
         return []
+
+
+def classify_niche(topic: str, context: str) -> str:
+    """Match topic+context against niche keywords."""
+    combined = (topic + " " + context).lower()
+    for niche, keywords in NICHES.items():
+        if any(kw in combined for kw in keywords):
+            return niche
+    return 'General'
+
+
+def compute_velocity(volume: int, rank: int, total: int) -> float:
+    """
+    Velocity Score for Google Trends.
+    
+    Formula:  base_volume_score + rank_boost + freshness_bonus
+    
+    - base: log-scale of raw search volume (prevents 1M+ from dominating everything)
+    - rank_boost: higher rank in Google's own trending = stronger signal
+    - freshness: top-of-list items get a recency bonus
+    """
+    import math
+    base = math.log10(max(volume, 1)) * 20          # 200K -> ~106, 10K -> ~80
+    rank_boost = max(0, (total - rank) / total) * 30  # #1 gets +30, last gets ~0
+    return round(base + rank_boost, 1)
+
 
 def process_trends():
     session = Session()
-    trends_data = fetch_internal_api()
-    
-    if not trends_data:
-        print("⚠️ Aucun flux récupéré via l'API interne.")
+    items = fetch_daily_trends()
+
+    if not items:
+        print("⚠️ Google: aucun flux récupéré.")
         return
 
-    print(f"🔍 {len(trends_data)} sujets récupérés via API Interne...")
-
+    print(f"🔍 Google: {len(items)} sujets récupérés")
     count_new = 0
-    for item in trends_data:
+    total = len(items)
+
+    for rank, item in enumerate(items):
         topic = item['topic']
         volume = item['volume']
-        
-        # 1. Classification
-        assigned_niche = 'General'
-        topic_lower = topic.lower() + " " + item['context'].lower()
-        
-        for niche, keywords in NICHES.items():
-            if any(k in topic_lower for k in keywords):
-                assigned_niche = niche
-                break
-        
-        # 2. Upsert Trend
-        trend_obj = session.query(Trend).filter_by(topic=topic).first()
-        
-        if not trend_obj:
-            trend_obj = Trend(topic=topic, niche=assigned_niche)
-            session.add(trend_obj)
+        niche = classify_niche(topic, item['context'])
+        velocity = compute_velocity(volume, rank, total)
+
+        trend = upsert_trend(session, topic, niche, 'Google')
+        if trend.id is None:
+            session.flush()
+        was_new = trend.first_detected == trend.last_updated
+        add_metric(session, trend, 'Google', volume, velocity)
+
+        if was_new:
             count_new += 1
-            session.commit()
-            print(f"  [+] {topic} ({assigned_niche}) - Vol: {item['volume']}")
-        
-        # 3. Métrique
-        metric = TrendMetric(
-            trend_id=trend_obj.id,
-            platform='Google',
-            volume=volume,
-            velocity_score=0.0 
-        )
-        session.add(metric)
-    
+            print(f"  [+] {topic} ({niche}) — Vol: {volume:,} — Vel: {velocity}")
+
     session.commit()
     session.close()
-    print(f"✅ Ingestion terminée. {count_new} nouveaux sujets.")
+    print(f"✅ Google: terminé. {count_new} nouveaux sujets.")
+
 
 if __name__ == "__main__":
     init_db()
