@@ -6,10 +6,12 @@ services:
     container_name: viral_watch_engine
     restart: always
     volumes:
-      # Persistance de la BDD : on lie le fichier du conteneur à ton dossier local
-      # Ainsi, si tu redémarres le docker, tu ne perds pas tes trends
+      # DB persistence
       - ./viral_data.db:/app/viral_data.db
-      # (Optionnel) Accès aux logs depuis l'extérieur
+      # Logs accessible from host
       - ./logs:/var/log
     environment:
-      - TZ=Europe/Paris # Important pour que le cron tourne à l'heure française
+      - TZ=Europe/Paris
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+    env_file:
+      - .env

@@ -1,12 +1,19 @@
-# cronjob
+# ──────────────────────────────────────────────────────────
+# VIRAL WATCH ENGINE — Cron Schedule (TZ=Europe/Paris)
+# ──────────────────────────────────────────────────────────
 
-# 1. Ingestion des données (Toutes les 4h : 00:00, 04:00, 08:00...)
-0 */4 * * * /usr/local/bin/python -m src.collectors.google_trends >> /var/log/cron.log 2>&1
-5 */4 * * * /usr/local/bin/python -m src.collectors.reddit_loader >> /var/log/cron.log 2>&1
-10 */4 * * * /usr/local/bin/python -m src.collectors.tiktok_loader >> /var/log/cron.log 2>&1
+# ── 1. DATA INGESTION (Every 4h: 00:00, 04:00, 08:00, 12:00, 16:00, 20:00) ──
+0  */4 * * * cd /app && /usr/local/bin/python -m src.collectors.google_trends >> /var/log/cron.log 2>&1
+5  */4 * * * cd /app && /usr/local/bin/python -m src.collectors.reddit_loader  >> /var/log/cron.log 2>&1
+10 */4 * * * cd /app && /usr/local/bin/python -m src.collectors.tiktok_loader  >> /var/log/cron.log 2>&1
 
-# 2. Analyse Radar & Détection d'Opportunités (15 min après l'ingestion)
-15 */4 * * * /usr/local/bin/python -m src.analysis.cross_platform_radar >> /var/log/cron.log 2>&1
+# ── 2. CROSS-PLATFORM ANALYSIS (15 min after ingestion) ──
+15 */4 * * * cd /app && /usr/local/bin/python -m src.analysis.cross_platform_radar >> /var/log/cron.log 2>&1
 
-# (Optionnel) Nettoyage des logs pour ne pas saturer le disque
-0 0 * * 0 echo "" > /var/log/cron.log
+# ── 3. MORNING DISCORD BRIEFING (Every day at 06:55 Paris time) ──
+55 6 * * * cd /app && /usr/local/bin/python -m src.analysis.discord_briefing >> /var/log/cron.log 2>&1
+
+# ── CLEANUP (Weekly Sunday midnight) ──
+0 0 * * 0 echo "=== LOG RESET $(date) ===" > /var/log/cron.log
+
+# Required empty line at end for cron

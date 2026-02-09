@@ -1,67 +1,63 @@
-import sqlite3
-import pandas as pd
+"""
+Hook Generator — Produces a copy-paste prompt for ChatGPT/Claude
+to generate viral video hooks from today's top trends.
+"""
 from datetime import datetime
+from sqlalchemy import text
+from src.models.base import Session, init_db
 
-DB_PATH = 'viral_data.db'
 
 def generate_viral_brief():
-    conn = sqlite3.connect(DB_PATH)
-    
-    # On récupère le Top 1 de chaque niche pour l'exemple
-    query = """
-    SELECT t.niche, t.topic, m.volume, m.velocity_score, m.platform
-    FROM trends t
-    JOIN trend_metrics m ON t.id = m.trend_id
-    WHERE m.timestamp > datetime('now', '-1 day')
-    ORDER BY m.velocity_score DESC
-    """
-    
-    df = pd.read_sql_query(query, conn)
-    conn.close()
+    session = Session()
 
-    if df.empty:
+    results = session.execute(text("""
+        SELECT t.niche, t.topic, m.volume, m.velocity_score, m.platform
+        FROM trends t
+        JOIN trend_metrics m ON t.id = m.trend_id
+        WHERE m.timestamp > datetime('now', '-1 day')
+        ORDER BY m.velocity_score DESC
+    """)).fetchall()
+
+    session.close()
+
+    if not results:
         print("⚠️ Pas assez de données. Lance les collecteurs d'abord !")
         return
 
-    # On prépare le buffer de texte
-    prompt_buffer = []
-    
-    # Header du Prompt (Le Cerveau)
-    prompt_buffer.append("--- COPY PASTE THIS INTO CHATGPT / CLAUDE ---")
-    prompt_buffer.append("\n# ROLE")
-    prompt_buffer.append("Tu es un expert en scénarisation de contenu viral pour TikTok/Reels.")
-    prompt_buffer.append("Ta mission : Transformer des sujets d'actualité en scripts vidéo à haute rétention.")
-    prompt_buffer.append("\n# OBJECTIF")
-    prompt_buffer.append("Pour chaque sujet ci-dessous, génère 3 HOOKS (Accroches visuelles et verbales) différents :")
-    prompt_buffer.append("1. Le Hook 'Polémique' (Diviser pour régner).")
-    prompt_buffer.append("2. Le Hook 'Storytelling' (Une histoire incroyable).")
-    prompt_buffer.append("3. Le Hook 'Éducatif' (Le Saviez-vous ?).")
-    
-    prompt_buffer.append("\n# CONTEXTE & DONNÉES (TOP TRENDS DU JOUR)")
-    
-    # Injection des données réelles
-    processed_topics = set()
-    
-    for niche in ['Sport', 'Cinema', 'Music']:
-        subset = df[df['niche'] == niche].head(2) # Top 2 par niche
-        
-        for _, row in subset.iterrows():
-            if row['topic'] in processed_topics: continue
-            processed_topics.add(row['topic'])
-            
-            prompt_buffer.append(f"\n## SUJET ({niche.upper()}) : {row['topic']}")
-            prompt_buffer.append(f"- Intensité virale : {int(row['velocity_score'])} points")
-            prompt_buffer.append(f"- Source : {row['platform']} (Preuve sociale forte)")
-            prompt_buffer.append(f"- Instruction Spécifique : Trouve un angle inattendu, ne raconte pas juste les faits.")
+    lines = []
 
-    prompt_buffer.append("\n# FORMAT DE SORTIE ATTENDU")
-    prompt_buffer.append("Pour chaque Hook :")
-    prompt_buffer.append("- Visuel : [Décris ce qu'on voit à l'écran en 5 mots]")
-    prompt_buffer.append("- Audio : [La première phrase exacte à dire, < 15 mots]")
-    prompt_buffer.append("- Pourquoi ça marche : [Explication technique en 1 phrase]")
-    
-    # Affichage du résultat
-    print("\n".join(prompt_buffer))
+    lines.append("--- COPY PASTE THIS INTO CHATGPT / CLAUDE ---")
+    lines.append("\n# ROLE")
+    lines.append("Tu es un expert en scénarisation de contenu viral pour TikTok/Reels.")
+    lines.append("Ta mission : Transformer des sujets d'actualité en scripts vidéo à haute rétention.")
+    lines.append("\n# OBJECTIF")
+    lines.append("Pour chaque sujet ci-dessous, génère 3 HOOKS (Accroches) différents :")
+    lines.append("1. Le Hook 'Polémique' (Diviser pour régner).")
+    lines.append("2. Le Hook 'Storytelling' (Une histoire incroyable).")
+    lines.append("3. Le Hook 'Éducatif' (Le Saviez-vous ?).")
+    lines.append(f"\n# DONNÉES DU {datetime.now().strftime('%d/%m/%Y')}")
+
+    seen = set()
+    for niche in ['Sport', 'Cinema', 'Music']:
+        subset = [r for r in results if r[0] == niche][:2]
+        for row in subset:
+            topic = row[1]
+            if topic in seen:
+                continue
+            seen.add(topic)
+            lines.append(f"\n## SUJET ({niche.upper()}) : {topic}")
+            lines.append(f"- Intensité virale : {int(row[3])} points")
+            lines.append(f"- Source : {row[4]}")
+            lines.append(f"- Instruction : Trouve un angle inattendu.")
+
+    lines.append("\n# FORMAT DE SORTIE")
+    lines.append("Pour chaque Hook :")
+    lines.append("- Visuel : [Ce qu'on voit à l'écran en 5 mots]")
+    lines.append("- Audio : [Première phrase exacte, < 15 mots]")
+    lines.append("- Pourquoi ça marche : [1 phrase technique]")
+
+    print("\n".join(lines))
+
 
 if __name__ == "__main__":
     generate_viral_brief()
