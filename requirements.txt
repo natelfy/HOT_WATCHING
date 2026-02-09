@@ -1,4 +1,16 @@
-sqlalchemy
-pytrends
+# Core
+sqlalchemy>=2.0
 pandas
+
+# HTTP / Scraping
+requests
 playwright
+
+# Google Trends (API wrapper)
+pytrends
+
+# Discord notifications
+discord-webhook
+
+# Scheduling (for future non-cron mode)
+# apscheduler
